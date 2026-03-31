@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+
+# YOLO model weights (downloaded automatically)
+*.pt
+
+# Data (regenerated at runtime)
+data/
+*.db
+
+# Test images
+bus.jpg
+test_parking.jpg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test / debug scripts
+debug_yolo.py
+test_fix.py
+test_improved.py
+test_parking_real.py
