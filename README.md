@@ -39,8 +39,8 @@ Built with YOLOv8 + SAHI tiling, RandomForest prediction, and a modern dark-them
 │       └── prediction.py    # Train, forecast, peak hours
 ├── ml_model/
 │   ├── detector.py          # YOLOv8s + SAHI tiling engine
-│   ├── slot_estimator.py    # Dynamic capacity estimation
-│   ├── slot_mapper.py       # IoU-based slot mapping
+│   ├── slot_estimator.py    # Virtual slot grid generator
+│   ├── slot_mapper.py       # Center-distance vehicle→slot mapper
 │   ├── predictor.py         # RandomForest predictor
 │   ├── simulator.py         # Historical data generator
 │   └── parking_config.py    # Slot layout & constants
@@ -50,7 +50,10 @@ Built with YOLOv8 + SAHI tiling, RandomForest prediction, and a modern dark-them
 │   └── css/styles.css       # Custom styles
 ├── run.py                   # Entry point
 ├── requirements.txt         # Dependencies
-└── README.md
+├── README.md
+├── PRESENTATION.md          # Presentation guide (demo flow + Q&A)
+├── PROJECT_REPORT.md        # Full report for evaluation
+└── STUDY_GUIDE.md           # Complete study reference (viva prep)
 ```
 
 ## How to Run

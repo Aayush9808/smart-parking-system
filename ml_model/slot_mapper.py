@@ -1,83 +1,103 @@
 """
-Maps detected vehicle bounding-boxes to predefined parking-slot regions
-using IoU and overlap ratio.
+Vehicle → Slot spatial mapper.
+
+Given a list of virtual grid slots (from slot_estimator.generate_slot_grid)
+and a list of detected vehicles, this module assigns each vehicle to the
+nearest slot by center-point distance.
+
+Rules
+-----
+- Each vehicle occupies at most ONE slot.
+- Each slot is occupied by at most ONE vehicle.
+- Assignment is greedy by descending confidence (best detections first).
+- Slots that get no vehicle remain "empty".
 """
 
-from typing import Dict, List
+import math
+from typing import Dict, List, Tuple
 
 
-def compute_iou(box1: Dict, box2: Dict) -> float:
-    """Intersection-over-Union between two axis-aligned boxes."""
-    x1 = max(box1["x1"], box2["x1"])
-    y1 = max(box1["y1"], box2["y1"])
-    x2 = min(box1["x2"], box2["x2"])
-    y2 = min(box1["y2"], box2["y2"])
-
-    intersection = max(0, x2 - x1) * max(0, y2 - y1)
-    area1 = (box1["x2"] - box1["x1"]) * (box1["y2"] - box1["y1"])
-    area2 = (box2["x2"] - box2["x1"]) * (box2["y2"] - box2["y1"])
-    union = area1 + area2 - intersection
-    return intersection / union if union else 0.0
+def _center(box: Dict) -> Tuple[float, float]:
+    return ((box["x1"] + box["x2"]) / 2.0, (box["y1"] + box["y2"]) / 2.0)
 
 
-def compute_overlap_ratio(detection: Dict, slot: Dict) -> float:
-    """What fraction of the *slot* area is covered by the detection box."""
-    x1 = max(detection["x1"], slot["x1"])
-    y1 = max(detection["y1"], slot["y1"])
-    x2 = min(detection["x2"], slot["x2"])
-    y2 = min(detection["y2"], slot["y2"])
-
-    intersection = max(0, x2 - x1) * max(0, y2 - y1)
-    slot_area = (slot["x2"] - slot["x1"]) * (slot["y2"] - slot["y1"])
-    return intersection / slot_area if slot_area else 0.0
+def _dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
-class SlotMapper:
-    """Assign occupied / empty status to every parking slot."""
+def map_vehicles_to_slots(
+    slots: List[Dict],
+    detections: List[Dict],
+) -> Tuple[List[Dict], Dict]:
+    """
+    Assign each detected vehicle to the nearest available slot.
 
-    def __init__(self, parking_slots: List[Dict]):
-        self.slots = parking_slots
+    Parameters
+    ----------
+    slots : list[dict]
+        Grid slots from generate_slot_grid (each has id, name, x1…y2, status="empty").
+    detections : list[dict]
+        Filtered vehicle detections (each has x1…y2, confidence, class_name).
 
-    def map_detections(
-        self,
-        detections: List[Dict],
-        iou_threshold: float = 0.15,
-        overlap_threshold: float = 0.30,
-    ) -> List[Dict]:
-        """
-        Returns a list of slot-status dicts:
-        [{id, name, status, confidence, iou, x1, y1, x2, y2}]
-        """
-        slot_statuses: List[Dict] = []
+    Returns
+    -------
+    mapped_slots : list[dict]
+        Updated slot list with status, confidence, class_name filled in.
+    stats : dict
+        total_slots, occupied, empty, occupancy_pct, mapping diagnostics.
+    """
+    # Work on copies so we don't mutate the inputs
+    mapped = [dict(s) for s in slots]
+    taken_slot_ids = set()
 
-        for slot in self.slots:
-            best_iou = 0.0
-            best_overlap = 0.0
-            best_conf = 0.0
+    # Sort detections by confidence descending — best matches first
+    sorted_dets = sorted(detections, key=lambda d: d["confidence"], reverse=True)
 
-            for det in detections:
-                iou = compute_iou(det, slot)
-                overlap = compute_overlap_ratio(det, slot)
-                if iou > best_iou:
-                    best_iou = iou
-                    best_conf = det.get("confidence", 1.0)
-                if overlap > best_overlap:
-                    best_overlap = overlap
+    # Pre-compute slot centres
+    slot_centers = {s["id"]: _center(s) for s in mapped}
 
-            is_occupied = best_iou >= iou_threshold or best_overlap >= overlap_threshold
+    matched = 0
+    unmatched_vehicles = 0
 
-            slot_statuses.append(
-                {
-                    "id": slot["id"],
-                    "name": slot["name"],
-                    "status": "occupied" if is_occupied else "empty",
-                    "confidence": round(best_conf if is_occupied else 1.0 - best_iou, 2),
-                    "iou": round(best_iou, 3),
-                    "x1": slot["x1"],
-                    "y1": slot["y1"],
-                    "x2": slot["x2"],
-                    "y2": slot["y2"],
-                }
-            )
+    for det in sorted_dets:
+        det_center = _center(det)
 
-        return slot_statuses
+        # Find nearest un-taken slot
+        best_id = None
+        best_dist = float("inf")
+        for s in mapped:
+            if s["id"] in taken_slot_ids:
+                continue
+            d = _dist(det_center, slot_centers[s["id"]])
+            if d < best_dist:
+                best_dist = d
+                best_id = s["id"]
+
+        if best_id is not None:
+            taken_slot_ids.add(best_id)
+            for s in mapped:
+                if s["id"] == best_id:
+                    s["status"] = "occupied"
+                    s["confidence"] = round(det["confidence"], 2)
+                    s["class_name"] = det.get("class_name", "car")
+                    break
+            matched += 1
+        else:
+            unmatched_vehicles += 1
+
+    total = len(mapped)
+    occupied = sum(1 for s in mapped if s["status"] == "occupied")
+    empty = total - occupied
+    occ_pct = round(occupied / total * 100, 1) if total else 0.0
+
+    stats = {
+        "total_slots": total,
+        "occupied": occupied,
+        "empty": empty,
+        "occupancy_pct": occ_pct,
+        "matched_vehicles": matched,
+        "unmatched_vehicles": unmatched_vehicles,
+        "total_vehicles": len(detections),
+    }
+
+    return mapped, stats

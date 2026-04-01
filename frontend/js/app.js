@@ -126,12 +126,12 @@ function renderDetectionResult(data) {
         container.innerHTML = `<img src="data:image/jpeg;base64,${data.result_image}" class="w-full rounded-lg" alt="Parking lot detection result">`;
     }
 
-    // Stats
+    // Stats — all from backend, no fabrication
     const setEl = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
-    setEl("vehicleCount", data.total_vehicles ?? data.total_occupied);
-    setEl("occupiedCount", data.total_occupied);
-    setEl("availableCount", data.total_empty);
-    setEl("totalSlots", data.total_slots);
+    setEl("vehicleCount", data.total_vehicles ?? 0);
+    setEl("occupiedCount", data.total_occupied ?? 0);
+    setEl("availableCount", data.total_empty ?? 0);
+    setEl("totalSlots", data.total_slots ?? 0);
     setEl("occupancyPct", data.occupancy_pct !== undefined ? data.occupancy_pct + "%" : "--");
 
     // Confidence note
@@ -161,16 +161,20 @@ function renderDetectionResult(data) {
     badge.className = "badge badge-live";
     badge.textContent = "Live";
 
-    // Slot grid
-    renderSlotGrid(data.slots);
+    // Slot grid — use actual grid dimensions when available
+    const gridCols = data.grid_cols || 3;
+    renderSlotGrid(data.slots, gridCols);
 }
 
 // ── Slot grid ────────────────────────────────────────────────────────────────
-function renderSlotGrid(slots) {
+function renderSlotGrid(slots, cols) {
     const grid = document.getElementById("slotGrid");
+    // Dynamically set columns to match the virtual grid
+    const colCount = Math.min(cols || 3, 6);  // cap at 6 for readability
+    grid.style.gridTemplateColumns = `repeat(${colCount}, 1fr)`;
     grid.innerHTML = "";
     if (!slots || !slots.length) {
-        grid.innerHTML = '<div class="empty-state col-span-3"><p>No data</p></div>';
+        grid.innerHTML = '<div class="empty-state col-span-3"><p>No slots detected — upload an image with vehicles</p></div>';
         return;
     }
     slots.forEach(s => {
@@ -179,7 +183,7 @@ function renderSlotGrid(slots) {
         const icon = isOcc
             ? '<svg class="w-5 h-5 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z"/><path stroke-linecap="round" stroke-linejoin="round" d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10m10 0h-3m3 0h5a1 1 0 001-1v-4a1 1 0 00-.8-.97l-3.2-.64A1 1 0 0015 10V6"/></svg>'
             : '<svg class="w-5 h-5 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>';
-        const conf = s.confidence !== undefined ? `${Math.round(s.confidence * 100)}%` : "";
+        const conf = (isOcc && s.confidence) ? `${Math.round(s.confidence * 100)}%` : "";
         const classLabel = (isOcc && s.class_name) ? s.class_name : "";
         grid.innerHTML += `
             <div class="slot-card ${cls}">

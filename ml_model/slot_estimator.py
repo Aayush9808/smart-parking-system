@@ -1,166 +1,154 @@
 """
-Dynamic parking-slot estimator.
+Virtual parking-slot grid generator.
 
-Instead of hardcoded slot coordinates, this module estimates the total
-parking capacity and maps each detected vehicle to a slot region.
+Given vehicle detections, this module creates a regular grid of parking
+slots that covers the detected parking area.  Each slot has real (x, y)
+coordinates and a unique row-col name (A1, A2, … B1, B2, …).
 
-Approach (honest for a prototype)
----------------------------------
-1. Each detected vehicle bounding box = 1 occupied slot.
-2. Estimate the total parking area from the convex hull of all detections
-   (with padding to account for visible empty spaces at the edges).
-3. Average detected vehicle size → one "standard slot" footprint.
-4. Divide parking area by slot footprint → estimated total capacity.
-5. Empty slots = estimated capacity − occupied.
+Pipeline
+--------
+1. Compute median vehicle width / height from detections.
+2. Find the bounding rectangle of all detections (+ padding).
+3. Lay a regular grid of slot-sized cells over that rectangle.
+4. Return the list of slot dicts with coordinates, suitable for
+   mapping and for drawing on the annotated image.
 
-This is an ESTIMATION — not ground-truth.  True slot detection requires
-either (a) known lot layout or (b) a slot-segmentation model trained on
-parking lot images.
+When no vehicles are detected the module returns an empty grid and a
+note explaining why.
 """
 
 import math
+import string
 from typing import Dict, List, Tuple
 
-import cv2
-import numpy as np
+
+# ── Row labels: A–Z, then AA–AZ, BA–BZ … (enough for any realistic lot) ────
+def _row_label(index: int) -> str:
+    """0→A, 1→B, … 25→Z, 26→AA, 27→AB, …"""
+    if index < 26:
+        return string.ascii_uppercase[index]
+    return string.ascii_uppercase[index // 26 - 1] + string.ascii_uppercase[index % 26]
 
 
-def estimate_parking_capacity(
+def generate_slot_grid(
     detections: List[Dict],
     image_shape: Tuple[int, int],   # (h, w)
-    min_total_slots: int = 0,
-) -> Dict:
+    pad_factor: float = 0.30,       # expand bbox by 30 % on each side
+    gap_ratio: float = 0.20,        # 20 % gap between slots (realistic spacing)
+) -> Tuple[List[Dict], Dict]:
     """
-    Estimate total parking capacity from detected vehicles.
+    Build a virtual parking-slot grid from detections.
 
     Returns
     -------
-    dict with keys:
-        total_vehicles    – number of detected vehicles
-        avg_vehicle_area  – average bounding box area (px²)
-        parking_area      – estimated total parking area (px²)
-        estimated_capacity – estimated total slots
-        occupied           – same as total_vehicles
-        empty              – estimated_capacity − occupied
-        occupancy_pct      – occupied / estimated_capacity × 100
-        confidence_note    – textual note on estimation quality
+    slots : list[dict]
+        Each slot has keys: id, name, x1, y1, x2, y2, status ("unknown"
+        at this stage — the mapper will fill in occupied/empty).
+    grid_info : dict
+        Metadata: rows, cols, slot_w, slot_h, region bounds, vehicle count,
+        confidence_note.
     """
-    n_vehicles = len(detections)
     img_h, img_w = image_shape
+    n_vehicles = len(detections)
 
+    # ── No detections → return empty grid ─────────────────────────────────
     if n_vehicles == 0:
-        cap = max(min_total_slots, 12)   # sensible default when nothing detected
-        return {
+        return [], {
+            "rows": 0, "cols": 0,
+            "slot_w": 0, "slot_h": 0,
+            "region": (0, 0, img_w, img_h),
+            "total_slots": 0,
             "total_vehicles": 0,
-            "avg_vehicle_area": 0,
-            "parking_area": img_h * img_w,
-            "estimated_capacity": cap,
-            "occupied": 0,
-            "empty": cap,
-            "occupancy_pct": 0.0,
-            "confidence_note": "No vehicles detected — capacity is a rough estimate.",
+            "confidence_note": "No vehicles detected — upload a clearer image or try a different angle.",
         }
 
-    # ── Vehicle sizes ─────────────────────────────────────────────────────────
-    areas = []
-    centers = []
-    for d in detections:
-        w = d["x2"] - d["x1"]
-        h = d["y2"] - d["y1"]
-        areas.append(w * h)
-        centers.append(((d["x1"] + d["x2"]) / 2, (d["y1"] + d["y2"]) / 2))
+    # ── Compute median vehicle size ───────────────────────────────────────
+    widths = [d["x2"] - d["x1"] for d in detections]
+    heights = [d["y2"] - d["y1"] for d in detections]
+    med_w = float(sorted(widths)[len(widths) // 2])
+    med_h = float(sorted(heights)[len(heights) // 2])
 
-    avg_area = float(np.mean(areas))
-    median_area = float(np.median(areas))
+    # Slot cell = vehicle size + gap
+    slot_w = med_w * (1 + gap_ratio)
+    slot_h = med_h * (1 + gap_ratio)
 
-    # Use median to be robust against outlier-sized detections
-    slot_area = median_area
+    # Clamp to sane minimums (at least 20 px)
+    slot_w = max(slot_w, 20)
+    slot_h = max(slot_h, 20)
 
-    # ── Parking region estimation ─────────────────────────────────────────────
-    # Convex hull of all detection centres, padded outward
-    pts = np.array(centers, dtype=np.float32)
-    if len(pts) >= 3:
-        hull = cv2.convexHull(pts)
-        hull_area = float(cv2.contourArea(hull))
-    else:
-        # Bounding rect of all detections
-        all_x1 = min(d["x1"] for d in detections)
-        all_y1 = min(d["y1"] for d in detections)
-        all_x2 = max(d["x2"] for d in detections)
-        all_y2 = max(d["y2"] for d in detections)
-        hull_area = float((all_x2 - all_x1) * (all_y2 - all_y1))
+    # ── Parking region (bounding rect of all detections + padding) ────────
+    all_x1 = min(d["x1"] for d in detections)
+    all_y1 = min(d["y1"] for d in detections)
+    all_x2 = max(d["x2"] for d in detections)
+    all_y2 = max(d["y2"] for d in detections)
 
-    # Add generous padding (×2.0) — the visible parking area is typically
-    # much larger than just the hull of occupied spots.
-    parking_area = hull_area * 2.0
-    # Clamp to image area
-    parking_area = min(parking_area, img_h * img_w * 0.85)
+    region_w = all_x2 - all_x1
+    region_h = all_y2 - all_y1
 
-    # ── Capacity estimation ───────────────────────────────────────────────────
-    # Parking slots are ~1.3× the size of a car bounding box (gap between cars)
-    slot_footprint = slot_area * 1.3
-    raw_capacity = parking_area / slot_footprint if slot_footprint > 0 else n_vehicles
+    pad_x = region_w * pad_factor
+    pad_y = region_h * pad_factor
 
-    # Estimated capacity should be at least the number of parked cars
-    estimated_capacity = max(int(round(raw_capacity)), n_vehicles)
-    estimated_capacity = max(estimated_capacity, min_total_slots)
+    rx1 = max(0, int(all_x1 - pad_x))
+    ry1 = max(0, int(all_y1 - pad_y))
+    rx2 = min(img_w, int(all_x2 + pad_x))
+    ry2 = min(img_h, int(all_y2 + pad_y))
 
-    occupied = n_vehicles
-    empty = estimated_capacity - occupied
-    occ_pct = round(occupied / estimated_capacity * 100, 1) if estimated_capacity else 0
+    grid_w = rx2 - rx1
+    grid_h = ry2 - ry1
 
-    # ── Confidence note ───────────────────────────────────────────────────────
+    # ── Grid dimensions ───────────────────────────────────────────────────
+    cols = max(1, int(round(grid_w / slot_w)))
+    rows = max(1, int(round(grid_h / slot_h)))
+
+    # Ensure at least as many slots as vehicles
+    while rows * cols < n_vehicles:
+        if cols <= rows:
+            cols += 1
+        else:
+            rows += 1
+
+    # Recompute cell size to fill region evenly
+    cell_w = grid_w / cols
+    cell_h = grid_h / rows
+
+    # ── Build slot list ───────────────────────────────────────────────────
+    slots: List[Dict] = []
+    slot_id = 0
+    for r in range(rows):
+        row_label = _row_label(r)
+        for c in range(cols):
+            slot_id += 1
+            sx1 = rx1 + int(c * cell_w)
+            sy1 = ry1 + int(r * cell_h)
+            sx2 = rx1 + int((c + 1) * cell_w)
+            sy2 = ry1 + int((r + 1) * cell_h)
+            slots.append({
+                "id": slot_id,
+                "name": f"{row_label}{c + 1}",
+                "x1": sx1, "y1": sy1,
+                "x2": sx2, "y2": sy2,
+                "status": "empty",          # default; mapper overrides
+                "confidence": 0.0,
+                "class_name": "",
+            })
+
+    # ── Confidence note ───────────────────────────────────────────────────
     if n_vehicles >= 5:
-        note = "Good estimate — based on detected vehicle sizes and parking region."
+        note = f"Grid: {rows}×{cols} slots derived from {n_vehicles} detected vehicles."
     elif n_vehicles >= 2:
-        note = "Approximate — few vehicles detected; capacity may be under/over-estimated."
+        note = f"Approximate grid ({rows}×{cols}) — few vehicles detected."
     else:
-        note = "Rough estimate — very few detections; capacity is uncertain."
+        note = f"Minimal grid ({rows}×{cols}) — only 1 vehicle detected; capacity uncertain."
 
-    return {
+    grid_info = {
+        "rows": rows,
+        "cols": cols,
+        "slot_w": round(cell_w),
+        "slot_h": round(cell_h),
+        "region": (rx1, ry1, rx2, ry2),
+        "total_slots": len(slots),
         "total_vehicles": n_vehicles,
-        "avg_vehicle_area": round(avg_area),
-        "parking_area": round(parking_area),
-        "estimated_capacity": estimated_capacity,
-        "occupied": occupied,
-        "empty": empty,
-        "occupancy_pct": occ_pct,
         "confidence_note": note,
     }
 
-
-def build_slot_list(detections: List[Dict], estimated_capacity: int) -> List[Dict]:
-    """
-    Build a slot-status list from detections + estimated empty count.
-
-    Occupied slots  → named S1, S2, … with the detection bounding box.
-    Empty slots     → named E1, E2, … with zeroed coordinates.
-    """
-    slots = []
-
-    # Occupied slots (one per detection)
-    for i, det in enumerate(detections):
-        slots.append({
-            "id": i + 1,
-            "name": f"S{i + 1}",
-            "status": "occupied",
-            "confidence": round(det["confidence"], 2),
-            "class_name": det.get("class_name", "car"),
-            "x1": det["x1"], "y1": det["y1"],
-            "x2": det["x2"], "y2": det["y2"],
-        })
-
-    # Empty slots
-    n_empty = max(0, estimated_capacity - len(detections))
-    for j in range(n_empty):
-        idx = len(detections) + j + 1
-        slots.append({
-            "id": idx,
-            "name": f"E{j + 1}",
-            "status": "empty",
-            "confidence": 1.0,
-            "class_name": "",
-            "x1": 0, "y1": 0, "x2": 0, "y2": 0,
-        })
-
-    return slots
+    return slots, grid_info

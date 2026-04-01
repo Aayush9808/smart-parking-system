@@ -31,7 +31,7 @@ print("\n[1] Server Health")
 try:
     r = requests.get(f"{BASE}/", timeout=5)
     check("Server responds", r.status_code == 200, f"(HTTP {r.status_code})")
-    check("Returns HTML", "Smart Parking" in r.text)
+    check("Returns HTML", "ParkSense" in r.text)
 except Exception as e:
     check("Server responds", False, str(e))
     print("SERVER NOT RUNNING — aborting.")
