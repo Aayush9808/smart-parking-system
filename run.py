@@ -1,22 +1,22 @@
 """
-ParkSense AI — Single entry-point.
-
-Usage:
-    python run.py
+ParkSense AI — Entry Point
 """
 
-import sys
-from pathlib import Path
-
-# Ensure project root is on the path
-sys.path.insert(0, str(Path(__file__).parent))
-
 import uvicorn
+from config.settings import HOST, PORT
 
 if __name__ == "__main__":
+    print()
+    print("   ParkSense AI v2.0")
+    print("   ─────────────────────────────────")
+    print(f"   Dashboard : http://localhost:{PORT}")
+    print(f"   API Docs  : http://localhost:{PORT}/docs")
+    print("   ─────────────────────────────────")
+    print()
+
     uvicorn.run(
         "backend.app:app",
-        host="0.0.0.0",
-        port=8000,
+        host=HOST,
+        port=PORT,
         reload=False,
     )
